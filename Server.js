@@ -1,36 +1,37 @@
-// Increase the max listeners if needed to prevent warnings
 require('events').EventEmitter.defaultMaxListeners = 20;
 
 require('dotenv').config();
 const express = require('express');
-const mysql = require('mysql2');
+const { Pool } = require('pg'); // Use pg for PostgreSQL
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const bcrypt = require('bcrypt');
 
 const app = express();
-const port = 5000;
+const port = process.env.PORT || 5000; // Default to 5000 for local testing
 
 // Enable CORS for all requests
 app.use(cors());
-// Parse incoming JSON requests
 app.use(bodyParser.json());
 
-// Create the MySQL connection using environment variables
-const db = mysql.createConnection({
-    host: process.env.DB_HOST,
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME
+// Create PostgreSQL connection pool
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: {
+        rejectUnauthorized: false, // Required for services like Render (SSL)
+    },
 });
 
-// Connect to the MySQL database
-db.connect(err => {
-    if (err) throw err;
-    console.log('Connected to MySQL Database');
+// Connect to PostgreSQL database
+pool.connect((err) => {
+    if (err) {
+        console.error('Error connecting to the database:', err);
+        process.exit(1);
+    }
+    console.log('Connected to PostgreSQL Database');
 });
 
-// Root endpoint to check if the server is working
+// Root endpoint
 app.get('/', (req, res) => {
     res.send('Welcome to the backend API');
 });
@@ -38,115 +39,132 @@ app.get('/', (req, res) => {
 // User signup route
 app.post('/api/signup', async (req, res) => {
     const { username, password } = req.body;
-    const hashedPassword = await bcrypt.hash(password, 10);
-    db.query('INSERT INTO users (username, password) VALUES (?, ?)', [username, hashedPassword], (err, results) => {
-        if (err) return res.status(400).send('Username already exists');
+    try {
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const result = await pool.query(
+            'INSERT INTO users (username, password) VALUES ($1, $2) RETURNING *',
+            [username, hashedPassword]
+        );
         res.send('Signup successful!');
-    });
+    } catch (err) {
+        console.error(err);
+        res.status(400).send('Username already exists');
+    }
 });
 
 // User login route
-app.post('/api/login', (req, res) => {
+app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
-
-    // Find the user in the database
-    db.query('SELECT * FROM users WHERE username = ?', [username], async (err, results) => {
-        if (results.length && await bcrypt.compare(password, results[0].password)) {
-            res.send(results[0]);
+    try {
+        const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+        if (result.rows.length && await bcrypt.compare(password, result.rows[0].password)) {
+            res.send(result.rows[0]);
         } else {
             res.status(401).send('Invalid credentials');
         }
-    });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Error logging in');
+    }
 });
 
 // Get all users
-app.get('/api/users', (req, res) => {
-    db.query('SELECT * FROM users', (err, results) => {
-        if (err) throw err;
-        res.send(results);
-    });
+app.get('/api/users', async (req, res) => {
+    try {
+        const result = await pool.query('SELECT * FROM users');
+        res.send(result.rows);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Error retrieving users');
+    }
 });
 
 // Get all products
-app.get('/api/products', (req, res) => {
-    db.query('SELECT * FROM products', (err, results) => {
-        if (err) throw err;
-        res.send(results);
-    });
+app.get('/api/products', async (req, res) => {
+    try {
+        const result = await pool.query('SELECT * FROM products');
+        res.send(result.rows);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Error retrieving products');
+    }
 });
 
 // Add a new product
-app.post('/api/products', (req, res) => {
+app.post('/api/products', async (req, res) => {
     const { name, description, price, quantity } = req.body;
-    db.query('INSERT INTO products (name, description, price, quantity) VALUES (?, ?, ?, ?)', 
-        [name, description, price, quantity], 
-        (err, results) => {
-            if (err) {
-                console.error("Error adding product:", err);
-                return res.status(500).send('Error adding product');
-            }
-            res.send('Product added successfully!');
-    });
+    try {
+        const result = await pool.query(
+            'INSERT INTO products (name, description, price, quantity) VALUES ($1, $2, $3, $4) RETURNING *',
+            [name, description, price, quantity]
+        );
+        res.send('Product added successfully!');
+    } catch (err) {
+        console.error('Error adding product:', err);
+        res.status(500).send('Error adding product');
+    }
 });
 
 // Update an existing product
-app.put('/api/products/:id', (req, res) => {
+app.put('/api/products/:id', async (req, res) => {
     const { id } = req.params;
     const { name, description, price, quantity } = req.body;
-
-    db.query('UPDATE products SET name = ?, description = ?, price = ?, quantity = ? WHERE id = ?', 
-        [name, description, price, quantity, id], 
-        (err, results) => {
-            if (err) throw err;
-            res.send('Product updated successfully!');
-    });
+    try {
+        await pool.query(
+            'UPDATE products SET name = $1, description = $2, price = $3, quantity = $4 WHERE id = $5',
+            [name, description, price, quantity, id]
+        );
+        res.send('Product updated successfully!');
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Error updating product');
+    }
 });
 
 // Delete a product
-app.delete('/api/products/:id', (req, res) => {
+app.delete('/api/products/:id', async (req, res) => {
     const { id } = req.params;
-
-    db.query('DELETE FROM products WHERE id = ?', [id], (err, results) => {
-        if (err) throw err;
+    try {
+        await pool.query('DELETE FROM products WHERE id = $1', [id]);
         res.send('Product deleted successfully!');
-    });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Error deleting product');
+    }
 });
 
 // Update a user's information
-app.put('/api/users/:id', (req, res) => {
+app.put('/api/users/:id', async (req, res) => {
     const { id } = req.params;
     const { username, password } = req.body;
-    
-    // Hash the new password before updating if it exists
-    if (password) {
-        bcrypt.hash(password, 10, (err, hashedPassword) => {
-            if (err) return res.status(500).send('Error hashing password');
-            
-            db.query('UPDATE users SET username = ?, password = ? WHERE id = ?', 
-                [username, hashedPassword, id], 
-                (err, results) => {
-                    if (err) return res.status(500).send('Error updating user');
-                    res.send('User updated successfully!');
-            });
-        });
-    } else {
-        db.query('UPDATE users SET username = ? WHERE id = ?', 
-            [username, id], 
-            (err, results) => {
-                if (err) return res.status(500).send('Error updating user');
-                res.send('User updated successfully!');
-        });
+
+    try {
+        if (password) {
+            const hashedPassword = await bcrypt.hash(password, 10);
+            await pool.query(
+                'UPDATE users SET username = $1, password = $2 WHERE id = $3',
+                [username, hashedPassword, id]
+            );
+        } else {
+            await pool.query('UPDATE users SET username = $1 WHERE id = $2', [username, id]);
+        }
+        res.send('User updated successfully!');
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Error updating user');
     }
 });
 
 // Delete a user
-app.delete('/api/users/:id', (req, res) => {
+app.delete('/api/users/:id', async (req, res) => {
     const { id } = req.params;
-
-    db.query('DELETE FROM users WHERE id = ?', [id], (err, results) => {
-        if (err) return res.status(500).send('Error deleting user');
+    try {
+        await pool.query('DELETE FROM users WHERE id = $1', [id]);
         res.send('User deleted successfully!');
-    });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Error deleting user');
+    }
 });
 
 // Start the server
